@@ -127,6 +127,41 @@ it. A home address can change; a free dynamic DNS name keeps one name pointing a
 
 Everyone on one relay plays together; players on Epic or on another relay are not seen.
 
+## Joining a registry
+
+A registry is where relays check in ([registry.md](registry.md)). A relay joins one with a `registry` block in
+its config. There is none by default, and a relay without one opens no connection for it and logs nothing of it.
+
+```
+"registry": {
+  "address": "registry.example.org",
+  "id": "r00112233445566778899aabbccddeeff",
+  "public": "relay.example.org:7777"
+}
+```
+
+| Field | Default | What it is |
+|---|---|---|
+| `address` | | the registry's `host:port`; the port is 7776 when none is given |
+| `id` | | the registry's id, from its start line; a registry at that address that proves another key is refused |
+| `public` | | the address players reach this relay at (`host:port`, the port 7777 when none is given) |
+| `afterMs` | 20000 | a number of 0 or more; this release reads it and does nothing with it |
+
+The registry dials `public` to make sure this relay answers there, so the registry must reach the relay at that
+address too (for a relay on the registry's own network, the registry's owner writes the private address in the
+registry's config). A mistake in the block (a field not known, an id or an address that is not one) stops the relay
+at its start with the reason.
+
+The relay's log has two lines for it:
+- `registry: checked in`, when the link to the registry has started. The registry then checks the address; the
+  registry's log says when the relay is listed.
+- `registry: lost: <why>; trying again`, when the link ends: the registry's refusal
+  (`this relay is refused by the registry`, for example), or the relay's own reason (`could not connect`, `the
+  registry went quiet`, `the registry at that address proved another key`). It is logged once, not for each try:
+  the relay dials again by itself, after 2 s and then a wait that doubles up to a minute.
+
+The relay serves its players all along, whether the registry is there or not.
+
 ## Playing on one network
 
 Players in one home or at one LAN party need no relay at all. LAN is off until a player turns it on (Settings > Online > LAN, with its
@@ -161,6 +196,7 @@ their game connects straight to the host and makes sure it is the PC the code na
 | `port` | 7777 | the TCP and UDP port |
 | `host` | `""` | the address to listen on: empty for all of the PC's addresses, IPv4 and IPv6 |
 | `limits` | below | what one relay allows |
+| `registry` | none | the registry it checks in to ("Joining a registry", above) |
 
 The limits (a player who passes a count or a byte rate is told why and disconnected, the log naming the address; a
 search, a join, an invite, an online list ask or a change of a player's entry over its rate, or a lobby past a count,
@@ -197,7 +233,7 @@ so the limits of one address and of one invited player are the ones that hold:
 | `sendBufferBytes` | 1048576 | data waiting for a player who reads too slowly; past it the player is disconnected |
 
 The first start writes every limit into the file; a release that changes a default does not change a file that
-is already there. Delete a line to take the default again. An unknown field or a value that is not a number above 0
+is already there. Delete a line to take the default again. An unknown limit or a value that is not a number above 0
 stops the program with the reason.
 
 ## What goes wrong
@@ -216,5 +252,7 @@ stops the program with the reason.
   connection is closed.
 - **A player is disconnected with "too many ..."**: they passed a limit. Raise it in the config if real players
   meet it.
+- **"mvs-relay: ...mvs-relay.json: unknown field "registery" is ignored"** (on stderr, at the start): the config
+  has a top-level field the relay does not read, often a misspelled one. The relay starts without it; fix the name.
 - **Behind the ISP's own NAT** (the router's outside address is `100.64.x.x` to `100.127.x.x`, or a private one):
   no port forward reaches the PC from the internet; run the relay on a rented server instead.

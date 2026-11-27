@@ -49,6 +49,7 @@ that compare against them skip and say so.
 | `mvs-net` | online play: rollback over the deterministic sim, the input codec, the links (in-memory, relay, LAN, Epic) |
 | `mvs-host` | the host core: the rules of one online session, run by the player who hosts it |
 | `mvs-relay` | the relay anyone may run: lobbies, searches, invites, the links that carry packets, the referees |
+| `mvs-registry` | the registry relays check in to, and its pages for adding and refusing relays |
 | **Experiments** | |
 | `trial-light` | UE 4.26's own deferred lighting and tonemapper from the global shader cache over a captured G-buffer |
 
