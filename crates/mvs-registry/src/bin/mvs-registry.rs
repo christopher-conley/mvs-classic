@@ -1,6 +1,7 @@
 //! mvs-registry: the registry relays check in to, on one TCP port. Its config (mvs-registry.json) and key
-//! (mvs-registry.key) are beside the executable, or the config is named by --config with the key beside it; both are
-//! made on the first run, and a config without its key beside it stops the registry.
+//! (mvs-registry.key) are beside the executable, or the config is named by --config with the key and the web pages'
+//! state (mvs-registry-state.json) beside it; config and key are made on the first run, and a config without its key
+//! beside it stops the registry.
 //!
 //!   mvs-registry [--port <n>] [--host <ip>] [--config <file>] [--version]
 
@@ -11,15 +12,18 @@ use std::pin::pin;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use mvs_protocol::registry_wire::{REGISTRY_PORT, REGISTRY_WIRE_VERSION};
 use mvs_protocol::relay_wire::{is_key_id, parse_address};
 use mvs_registry::core::{Admission, Approved, Limits, Mode, Origin};
 use mvs_registry::rules::{Ban, Bans};
 use mvs_registry::server::{Options, start_registry};
+use mvs_registry::state::{State, Submissions, admission};
 use serde_json::{Value, json};
 
 /// The config's fields, in the order the first run writes them.
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 15] = [
     "port",
     "host",
     "admission",
@@ -31,9 +35,22 @@ const FIELDS: [&str; 11] = [
     "listMs",
     "recheckMs",
     "refreshMs",
+    "dialsPerMinute",
+    "submissions",
+    "submitsPerMinute",
+    "web",
 ];
+/// The fields of [`FIELDS`] that are `Limits`.
+const LIMITS: std::ops::Range<usize> = 5..12;
 /// A `relays` entry's fields.
 const RELAY_FIELDS: [&str; 3] = ["id", "address", "name"];
+/// The `web` block's fields.
+const WEB_FIELDS: [&str; 5] = ["port", "host", "adminPort", "adminHost", "adminToken"];
+/// The public page's port and the admin page's.
+const WEB_PORT: u16 = 7775;
+const ADMIN_PORT: u16 = 7774;
+/// The state file's name, beside the config.
+const STATE_FILE: &str = "mvs-registry-state.json";
 
 /// The config file's settings.
 struct Config {
@@ -42,6 +59,38 @@ struct Config {
     host: String,
     admission: Admission,
     limits: Limits,
+    pages: Pages,
+}
+
+/// What the web pages are started with.
+struct Pages {
+    submissions: Submissions,
+    submits_per_minute: f64,
+    /// None: no `web` block, and no page is served.
+    web: Option<Web>,
+}
+
+/// The `web` block: the public page's port and address (an IPv4 one, or empty for all), the admin page's, and the
+/// token the admin page asks for.
+struct Web {
+    port: u16,
+    host: String,
+    admin_port: u16,
+    admin_host: String,
+    admin_token: String,
+}
+
+impl Web {
+    fn new(admin_token: String) -> Web {
+        Web { port: WEB_PORT, host: String::new(), admin_port: ADMIN_PORT, admin_host: "127.0.0.1".into(), admin_token }
+    }
+}
+
+/// A new admin token: 32 random bytes, standard base64.
+fn new_token() -> String {
+    let mut b = [0u8; 32];
+    rand::fill(&mut b);
+    STANDARD.encode(b)
 }
 
 /// `YYYY-MM-DD HH:MM:SSZ`, UTC (as the relay's log).
@@ -121,9 +170,16 @@ fn number(v: f64) -> Value {
     if v.fract() == 0.0 && v.abs() < 9007199254740992.0 { json!(v as i64) } else { json!(v) }
 }
 
-/// The defaults, in the order of [`FIELDS`], two spaces to a level.
-fn defaults_text() -> String {
+/// The defaults, in the order of [`FIELDS`], two spaces to a level, the `web` block with `web`'s token.
+fn defaults_text(web: &Web) -> String {
     let l = Limits::default();
+    let web = [
+        format!("\"port\": {}", web.port),
+        format!("\"host\": {}", json!(web.host)),
+        format!("\"adminPort\": {}", web.admin_port),
+        format!("\"adminHost\": {}", json!(web.admin_host)),
+        format!("\"adminToken\": {}", json!(web.admin_token)),
+    ];
     let lines = [
         format!("\"port\": {REGISTRY_PORT}"),
         "\"host\": \"\"".to_string(),
@@ -136,6 +192,10 @@ fn defaults_text() -> String {
         format!("\"listMs\": {}", number(l.list_ms)),
         format!("\"recheckMs\": {}", number(l.recheck_ms)),
         format!("\"refreshMs\": {}", number(l.refresh_ms)),
+        format!("\"dialsPerMinute\": {}", number(l.dials_per_minute)),
+        "\"submissions\": \"auto\"".to_string(),
+        "\"submitsPerMinute\": 12".to_string(),
+        format!("\"web\": {{\n    {}\n  }}", web.join(",\n    ")),
     ];
     format!("{{\n  {}\n}}\n", lines.join(",\n  "))
 }
@@ -164,7 +224,39 @@ fn relay(v: &Value, what: &str) -> Approved {
     Approved { id, address, name: text("name"), origin: Origin::Config }
 }
 
-/// The config file's, over the defaults; written with the defaults when there is none.
+/// The `web` block, over the defaults (an empty token).
+fn web(v: &Value, f: &str) -> Web {
+    let Value::Object(w) = v else { fail(&format!("{f}: web is not an object")) };
+    for k in w.keys() {
+        if !WEB_FIELDS.contains(&k.as_str()) {
+            fail(&format!("{f}: web.{k} is not a field ({})", WEB_FIELDS.join(", ")));
+        }
+    }
+    let text = |k: &str| match w.get(k) {
+        None => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => fail(&format!("{f}: web.{k} is not text")),
+    };
+    let mut out = Web::new(String::new());
+    if let Some(p) = w.get("port") {
+        out.port = port(p, &format!("{f}: web.port"));
+    }
+    if let Some(h) = text("host") {
+        out.host = host(&h, &format!("{f}: web.host"));
+    }
+    if let Some(p) = w.get("adminPort") {
+        out.admin_port = port(p, &format!("{f}: web.adminPort"));
+    }
+    if let Some(h) = text("adminHost") {
+        out.admin_host = host(&h, &format!("{f}: web.adminHost"));
+    }
+    if let Some(t) = text("adminToken") {
+        out.admin_token = t;
+    }
+    out
+}
+
+/// The config file's, over the defaults; written with the defaults (and a new admin token) when there is none.
 fn read_config(file: &Path) -> Config {
     let f = file.display();
     let mut out = Config {
@@ -172,9 +264,13 @@ fn read_config(file: &Path) -> Config {
         host: String::new(),
         admission: Admission { mode: Mode::Open, approved: Vec::new(), bans: Bans::new(Vec::new()) },
         limits: Limits::default(),
+        pages: Pages { submissions: Submissions::Auto, submits_per_minute: 12.0, web: None },
     };
     if !file.exists() {
-        if let Err(e) = std::fs::write(file, defaults_text()) {
+        let web = Web::new(new_token());
+        let text = defaults_text(&web);
+        out.pages.web = Some(web);
+        if let Err(e) = std::fs::write(file, text) {
             fail(&format!("could not write {f}: {e}"));
         }
         say(&format!("wrote {f} with the defaults"));
@@ -229,7 +325,7 @@ fn read_config(file: &Path) -> Config {
         out.admission.bans = Bans::new(bans);
     }
     let l = &mut out.limits;
-    for k in &FIELDS[5..] {
+    for k in &FIELDS[LIMITS] {
         let Some(v) = get(k) else { continue };
         let what = format!("{f}: {k}");
         match *k {
@@ -238,11 +334,23 @@ fn read_config(file: &Path) -> Config {
             "checks" => l.checks = count(v, &what),
             "listMs" => l.list_ms = positive(v, &what),
             "recheckMs" => l.recheck_ms = positive(v, &what),
-            _ => l.refresh_ms = positive(v, &what),
+            "refreshMs" => l.refresh_ms = positive(v, &what),
+            "dialsPerMinute" => l.dials_per_minute = positive(v, &what),
+            _ => unreachable!("{k} is a limit's field"),
         }
     }
-    if out.admission.mode == Mode::List && out.admission.approved.is_empty() {
-        fail(&format!("{f}: admission is \"list\" and relays is empty: no relay could check in"));
+    if let Some(s) = get("submissions") {
+        out.pages.submissions = match s.as_str() {
+            Some("auto") => Submissions::Auto,
+            Some("review") => Submissions::Review,
+            _ => fail(&format!("{f}: submissions is not \"auto\" or \"review\"")),
+        };
+    }
+    if let Some(v) = get("submitsPerMinute") {
+        out.pages.submits_per_minute = positive(v, &format!("{f}: submitsPerMinute"));
+    }
+    if let Some(w) = get("web") {
+        out.pages.web = Some(web(w, &f.to_string()));
     }
     out
 }
@@ -297,6 +405,8 @@ fn main() {
         fail(&format!("could not make or read the key {}: {e}", key_file.display()));
     }
     let mut config = read_config(&config_file);
+    let state_file = config_file.with_file_name(STATE_FILE);
+    let state = State::load(&state_file).unwrap_or_else(|e| fail(&e));
     if let Some(p) = arg(&args, "--port") {
         config.port = port(&Value::String(p), "--port");
     }
@@ -308,6 +418,14 @@ fn main() {
         Mode::List => "list",
     };
     let (relays, bans) = (config.admission.approved.len(), config.admission.bans.list().len());
+    config.admission = admission(config.admission, &state);
+    if config.admission.mode == Mode::List && config.admission.approved.is_empty() {
+        fail(&format!(
+            "{}: admission is \"list\" and relays is empty, as is the approved list of {}: no relay could check in",
+            config_file.display(),
+            state_file.display()
+        ));
+    }
 
     // Every connection's handling is guarded in the server (a panic there closes that connection). A panic is logged
     // by where it was, never by its message, which may hold a relay's text.

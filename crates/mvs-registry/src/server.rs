@@ -99,7 +99,7 @@ impl Default for Options {
 }
 
 /// `v` ms as a Duration: 0 for a negative or NaN one, a long time for one past range.
-fn duration(v: f64) -> Duration {
+pub(crate) fn duration(v: f64) -> Duration {
     Duration::from_secs_f64(if v > 0.0 { v.min(1e12) / 1000.0 } else { 0.0 })
 }
 
@@ -270,6 +270,26 @@ pub struct Running {
     shared: Rc<Shared>,
     state: Rc<RefCell<State>>,
     tasks: Vec<JoinHandle<()>>,
+}
+
+/// A running registry's core and log, for what works on it from its own thread (a submission). Cloned cheaply.
+#[derive(Clone)]
+pub struct Handle {
+    shared: Rc<Shared>,
+    state: Rc<RefCell<State>>,
+}
+
+impl Handle {
+    /// Runs `f` on the registry's core with its clock. Not to be called from inside `f`.
+    pub fn with_core<R>(&self, f: impl FnOnce(&mut Registry, f64) -> R) -> R {
+        let now = self.shared.now();
+        f(&mut self.state.borrow_mut().core, now)
+    }
+
+    /// One line to the registry's log.
+    pub fn log(&self, line: &str) {
+        say_log(&self.shared.log, line);
+    }
 }
 
 /// Appends one frame of type `ty` whose body is `body` to the connection's bytes out: sealed once the challenge is
@@ -605,11 +625,17 @@ pub enum Lookup {
 
 /// `host` looked up (an IPv4 literal is its own answer) within the address check's time.
 async fn lookup(sh: &Shared, host: &str, port: u16) -> Lookup {
+    look_up(sh.resolve.as_ref(), host, port, sh.prove_ms).await
+}
+
+/// `host` looked up by `resolve` (None: tokio's `lookup_host`, its first IPv4 answer) within `ms`; an IPv4 literal
+/// is its own answer.
+pub(crate) async fn look_up(resolve: Option<&Resolve>, host: &str, port: u16, ms: f64) -> Lookup {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Lookup::Ip(ip);
     }
     let answer = async {
-        match &sh.resolve {
+        match resolve {
             Some(r) => r(host.to_string(), port).await,
             None => match tokio::net::lookup_host((host, port)).await {
                 Ok(addrs) => addrs
@@ -623,13 +649,19 @@ async fn lookup(sh: &Shared, host: &str, port: u16) -> Lookup {
             },
         }
     };
-    tokio::time::timeout(duration(sh.prove_ms), answer).await.unwrap_or(Lookup::Failed)
+    tokio::time::timeout(duration(ms), answer).await.unwrap_or(Lookup::Failed)
 }
 
 /// The address check of member `k` at `at`: Proved when the key proved there is its own, OtherKey for another,
-/// NoAnswer for none within the time. None: the member is gone.
+/// NoAnswer for none within the time, or with no dial when `at` is past its dial rate. None: the member is gone.
 async fn proof(sh: &Shared, k: MemberKey, at: SocketAddrV4) -> Option<Proof> {
-    let id = sh.state()?.borrow().conns.get(&k)?.c.borrow().id.clone();
+    let st = sh.state()?;
+    let id = st.borrow().conns.get(&k)?.c.borrow().id.clone();
+    let may = st.borrow_mut().core.may_dial_target(at, sh.now());
+    drop(st);
+    if !may {
+        return Some(Proof::NoAnswer);
+    }
     let dial = match &sh.prove {
         Some(p) => p(at, sh.prove_ms),
         None => Box::pin(prove_key(at, sh.prove_ms)),
@@ -913,8 +945,12 @@ pub fn start_registry(o: Options) -> io::Result<Running> {
 impl Running {
     /// Runs `f` on the registry's core with its clock (tests, the web pages).
     pub fn with_core<R>(&self, f: impl FnOnce(&mut Registry, f64) -> R) -> R {
-        let now = self.shared.now();
-        f(&mut self.state.borrow_mut().core, now)
+        self.handle().with_core(f)
+    }
+
+    /// A handle to its core that can be cloned and kept apart from the `Running` (which `close` takes).
+    pub fn handle(&self) -> Handle {
+        Handle { shared: self.shared.clone(), state: self.state.clone() }
     }
 
     /// Every member told STOPPING, the socket closed; returns once every connection has ended.

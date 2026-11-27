@@ -58,6 +58,8 @@ pub struct Limits {
     pub recheck_ms: f64,
     /// A listed member whose check-in named a host name has it resolved again this often (ms): 60000.
     pub refresh_ms: f64,
+    /// Dials of one target `ip:port` a minute, whatever asked for them (`Buckets::per_minute`): 12.
+    pub dials_per_minute: f64,
 }
 
 impl Default for Limits {
@@ -70,6 +72,7 @@ impl Default for Limits {
             list_ms: 600_000.0,
             recheck_ms: 15_000.0,
             refresh_ms: 60_000.0,
+            dials_per_minute: 12.0,
         }
     }
 }
@@ -218,6 +221,8 @@ pub struct Registry {
     limits: Limits,
     log: Box<dyn FnMut(&str)>,
     rates: Buckets,
+    /// Dials by target, keyed by its `ip:port`.
+    dials: Buckets,
     /// In the order of their connections.
     members: IndexMap<MemberKey, Conn>,
     next: u64,
@@ -233,6 +238,7 @@ impl Registry {
             approved: admission.approved,
             bans: admission.bans,
             rates: Buckets::per_minute(limits.connects_per_minute),
+            dials: Buckets::per_minute(limits.dials_per_minute),
             limits,
             log,
             members: IndexMap::new(),
@@ -501,6 +507,12 @@ impl Registry {
     /// Every listed member of that protocol, in the order of their connections.
     pub fn relays(&self, proto: u32) -> Vec<RelayEntry> {
         self.members.values().filter(|c| c.group() == Some(proto)).filter_map(|c| self.entry(c)).collect()
+    }
+
+    /// Whether `at` may be dialed now (a check-in's check, a refresh's, a submission's): false past
+    /// `dials_per_minute` for that `ip:port`, and the dial is counted when true.
+    pub fn may_dial_target(&mut self, at: SocketAddrV4, now: f64) -> bool {
+        self.dials.get(&at.to_string(), now).take(1.0, now)
     }
 
     /// On the allow list (an entry of the same id replaced). A listed member of that id is sent again to its group

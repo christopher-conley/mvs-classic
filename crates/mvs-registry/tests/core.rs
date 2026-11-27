@@ -692,3 +692,15 @@ fn a_ban_added_during_a_check_holds() {
     assert_eq!(fb.take(), [gone(1)]);
     assert_eq!(r.relays(PROTO), vec![entry(2, &public(2), false)]);
 }
+
+#[test]
+fn one_target_has_its_dial_rate() {
+    let mut r = with(Limits { dials_per_minute: 2.0, ..Limits::default() });
+    let at = SocketAddrV4::new(v4("198.51.100.1"), 7777);
+    assert!(r.may_dial_target(at, 0.0));
+    assert!(r.may_dial_target(at, 1.0));
+    assert!(!r.may_dial_target(at, 2.0), "the third within a minute");
+    assert!(r.may_dial_target(SocketAddrV4::new(v4("198.51.100.1"), 7778), 2.0), "another port of that IP");
+    assert!(r.may_dial_target(SocketAddrV4::new(v4("198.51.100.2"), 7777), 2.0), "another IP");
+    assert!(r.may_dial_target(at, 60_002.0), "a minute later");
+}

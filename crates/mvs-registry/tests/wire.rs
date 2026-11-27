@@ -387,3 +387,24 @@ fn a_name_that_moves_is_followed() {
         assert!(!m.closed());
     });
 }
+
+#[test]
+fn a_check_in_past_the_dial_rate_is_tried_later() {
+    run(async {
+        // (no answer from any check: the stub's id is None)
+        let stub = Stub::default();
+        let mut o = options(&stub);
+        o.limits.dials_per_minute = 1.0;
+        let reg = start_registry(o).unwrap();
+        let m = Member::dial(reg.port, None).await;
+        m.start(&reg.id).await;
+        m.check_in("198.51.100.7:7777");
+        until("the first check", 1000, || stub.dialed().len() == 1).await;
+        // The checks due again at 20, 40 and 80 ms find the target past its rate: no dial, no refusal.
+        sleep(200).await;
+        assert_eq!(stub.dialed(), [SocketAddrV4::new(AT, 7777)], "one dial within the minute");
+        assert_eq!(listed_at(&reg, &m.id), None);
+        assert!(!m.closed(), "waiting, not refused");
+        reg.close().await;
+    });
+}
