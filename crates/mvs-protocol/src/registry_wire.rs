@@ -1,7 +1,9 @@
 //! The registry link's wire: between a relay and the registry that tells it which other relays it may meet. The
 //! relay dials the registry ([`REGISTRY_PORT`]) and keeps the link: it checks in with its address, versions and counts
-//! ([`ToRegistry::CheckIn`]), beats every [`BEAT_MS`] with its counts, and hears back the relays it may meet, whole,
-//! at each change ([`FromRegistry::Relays`]). Messages are UTF-8 JSON `{ t, ... }`, field names camelCase.
+//! ([`ToRegistry::CheckIn`]), beats every [`BEAT_MS`] with its counts, and hears back the relays it may meet as
+//! changes: one listed or changed ([`FromRegistry::RelayUp`]), one gone ([`FromRegistry::RelayGone`]). The registry
+//! keeps the counts to itself; a relay keeps one entry for each id. Messages are UTF-8 JSON `{ t, ... }`, field names
+//! camelCase.
 //!
 //! The link's start has the relay wire's shape: hello (the relay's key, a nonce and an X25519 key of its own, `kx`) ->
 //! challenge (the registry's key, nonce, `kx` and signature) -> prove (the relay's signature) -> welcome { id } or
@@ -49,14 +51,15 @@ pub struct Counts {
     pub max_matches: u32,
 }
 
-/// One relay in a [`FromRegistry::Relays`]: its id, the address it is reached at, its name if it has one, its load.
+/// One relay in a [`FromRegistry::RelayUp`]: its id, the IPv4 `a.b.c.d:port` the registry verified it at, its name
+/// if it has one, and whether it is on the registry's allow list (a ping target and a host candidate).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayEntry {
     pub id: String,
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    pub counts: Counts,
+    pub approved: bool,
 }
 
 /// What a relay sends the registry.
@@ -95,9 +98,14 @@ pub enum FromRegistry {
     },
     /// The answer to each beat: what tells a relay its registry is still there.
     Beat {},
-    /// The relays this one may meet (same protocol, itself left out), whole, at each change.
-    Relays {
-        relays: Vec<RelayEntry>,
+    /// A relay this one may meet (same protocol, itself left out) is listed, or its entry changed: the receiver keeps
+    /// the last entry sent for each id. At its own listing a relay hears one of these for each relay already there.
+    RelayUp {
+        relay: RelayEntry,
+    },
+    /// A relay sent in a [`FromRegistry::RelayUp`] is gone.
+    RelayGone {
+        id: String,
     },
 }
 
@@ -138,10 +146,20 @@ mod tests {
             serde_json::to_value(check_in).unwrap(),
             json!({"t":"checkIn","address":"a:1","wire":7,"proto":31,"counts":{"players":1,"maxPlayers":500,"matches":0,"maxMatches":250}})
         );
-        let entry = RelayEntry { id: "r1".into(), address: "a:1".into(), name: None, counts };
-        let relays = serde_json::to_value(FromRegistry::Relays { relays: vec![entry] }).unwrap();
-        assert_eq!(relays["t"], json!("relays"));
-        assert!(relays["relays"][0].get("name").is_none(), "no name is left out");
+        let relay = RelayEntry { id: "r1".into(), address: "1.2.3.4:7777".into(), name: None, approved: false };
+        assert_eq!(
+            serde_json::to_value(FromRegistry::RelayUp { relay }).unwrap(),
+            json!({"t":"relayUp","relay":{"id":"r1","address":"1.2.3.4:7777","approved":false}}),
+            "no name is left out"
+        );
+    }
+
+    #[test]
+    fn a_relay_gone_is_its_id() {
+        assert_eq!(
+            serde_json::to_value(FromRegistry::RelayGone { id: "r1".into() }).unwrap(),
+            json!({"t":"relayGone","id":"r1"})
+        );
     }
 
     #[test]
