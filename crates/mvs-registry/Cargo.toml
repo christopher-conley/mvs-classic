@@ -1,0 +1,10 @@
+[package]
+name = "mvs-registry"
+description = "The registry relays check in to: which relays are up and where, and who may be."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mvs-protocol.workspace = true

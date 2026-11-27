@@ -841,6 +841,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvs-registry"
+version = "0.1.12"
+dependencies = [
+ "mvs-protocol",
+]
+
+[[package]]
 name = "mvs-relay"
 version = "0.1.12"
 dependencies = [
