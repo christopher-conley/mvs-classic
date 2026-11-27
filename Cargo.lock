@@ -844,7 +844,9 @@ dependencies = [
 name = "mvs-registry"
 version = "0.1.12"
 dependencies = [
+ "indexmap",
  "mvs-protocol",
+ "mvs-relay",
 ]
 
 [[package]]

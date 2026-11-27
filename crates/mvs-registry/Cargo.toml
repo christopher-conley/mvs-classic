@@ -8,3 +8,6 @@ publish.workspace = true
 
 [dependencies]
 mvs-protocol.workspace = true
+# the per-address connection rate (limits::Buckets)
+mvs-relay.workspace = true
+indexmap.workspace = true
