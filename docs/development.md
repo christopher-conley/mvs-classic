@@ -202,5 +202,6 @@ when the code changes, and the Linux check on GitHub fails until they are.
 - `crates/`: the program, one crate per part (`crates/README.md`).
 - `docs/code-style.md`: how code and comments are written.
 - `docs/experimental.md`: the custom lobby's opt-in rules.
+- `docs/registry.md`: running a registry relays check in to.
 - `docs/relay.md`: running a relay.
 - `online.json`: the default relay the game connects to.

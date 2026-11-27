@@ -160,6 +160,10 @@ The relay's log has two lines for it:
   registry went quiet`, `the registry at that address proved another key`). It is logged once, not for each try:
   the relay dials again by itself, after 2 s and then a wait that doubles up to a minute.
 
+The registry checks the address by connecting to the relay as a game would, and hangs up once the relay has
+proved its key. The relay's log shows each check as a player's connection from the registry's address that closed
+(`<registry's address> r... closed`).
+
 The relay serves its players all along, whether the registry is there or not.
 
 ## Playing on one network
