@@ -844,9 +844,15 @@ dependencies = [
 name = "mvs-registry"
 version = "0.1.12"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
  "indexmap",
  "mvs-protocol",
  "mvs-relay",
+ "mvs-release",
+ "rand",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

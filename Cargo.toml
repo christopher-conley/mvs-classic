@@ -55,7 +55,7 @@ zeroize = "=1.9.1"
 rand = "=0.10.3"
 # the relay's JSON fields of keys, nonces, signatures and tokens; mvs-dist's guard (the key as base64)
 base64 = "=0.23.1"
-# mvs-relay only: its sockets on a current-thread runtime (the game uses std sockets on a net thread)
+# mvs-relay and mvs-registry: their sockets on a current-thread runtime (the game uses std sockets on a net thread)
 tokio = { version = "=1.53.3", default-features = false, features = ["rt", "net", "io-util", "time"] }
 # mvs-relay: a dual-stack listening socket (IPv6 with IPv4 too) and its UDP twins
 socket2 = "=0.6.5"
