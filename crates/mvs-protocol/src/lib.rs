@@ -17,6 +17,7 @@ pub mod profile;
 pub mod queue_rules;
 pub mod record;
 pub mod referee;
+pub mod registry_wire;
 pub mod relay_seal;
 pub mod relay_wire;
 pub mod roster;
