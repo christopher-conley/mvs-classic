@@ -155,7 +155,8 @@ pub fn start_pages(o: PageOptions, cx: SubmitCx) -> Result<Pages, BindError> {
             None
         }
     };
-    tasks.push(tokio::task::spawn_local(answer(Rc::new(cx), rx)));
+    let registry = cx.registry.clone();
+    tasks.push(registry.spawn(answer(Rc::new(cx), rx)));
     Ok(Pages { port, admin_port, tasks })
 }
 
@@ -195,7 +196,8 @@ async fn answer(cx: Rc<SubmitCx>, mut rx: mpsc::Receiver<Ask>) {
             }
             Ask::Submit { source, address, name, answer } => {
                 let cx = cx.clone();
-                tokio::task::spawn_local(async move {
+                let registry = cx.registry.clone();
+                registry.spawn(async move {
                     let now = cx.registry.with_core(|_, now| now);
                     let _ = answer.send(submit(&cx, source, &address, name.as_deref(), now).await);
                 });
@@ -311,6 +313,8 @@ fn note(status: StatusCode, title: &str, text: &str) -> Response {
     html(status, title, &format!("<p>{}</p>\n<p><a href=\"/\">Back</a></p>\n", esc(text)))
 }
 
+/// A request whose registry side is gone: the `Pages` were dropped (their answering task with them) while a
+/// connection a page had taken still runs. A panic there never gets here: it ends the program.
 fn not_answering() -> Response {
     note(StatusCode::SERVICE_UNAVAILABLE, "mvs-registry", "the registry is not answering")
 }

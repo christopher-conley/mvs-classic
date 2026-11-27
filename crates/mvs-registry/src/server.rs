@@ -290,6 +290,11 @@ impl Handle {
     pub fn log(&self, line: &str) {
         say_log(&self.shared.log, line);
     }
+
+    /// Runs a task of the registry's, as its own are run: a panic in it is logged and ends the program.
+    pub(crate) fn spawn(&self, f: impl Future<Output = ()> + 'static) -> JoinHandle<()> {
+        spawn(&self.shared.log, f)
+    }
 }
 
 /// Appends one frame of type `ty` whose body is `body` to the connection's bytes out: sealed once the challenge is
