@@ -292,6 +292,7 @@ async fn host_run(
             hosted: Some(HostedOptions::system(false)),
             // (its guests join by its direct code: a short code would name the release's relay)
             shorts: false,
+            registry: None,
         };
         match start_relay(o) {
             Ok(r) => {

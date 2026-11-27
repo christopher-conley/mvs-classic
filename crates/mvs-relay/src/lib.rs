@@ -6,4 +6,5 @@
 pub mod core;
 pub mod hosted;
 pub mod limits;
+mod registry_link;
 pub mod server;

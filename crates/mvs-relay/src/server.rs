@@ -52,6 +52,8 @@ use tokio::task::JoinHandle;
 use crate::core::{Core, CorePlayer, REFEREE_PUMP_MS, Session, Taken};
 use crate::hosted::HostedOptions;
 use crate::limits::{RelayLimits, TokenBucket, address_group, relay_limits};
+use crate::registry_link::{self, Kept, Link, counts_of};
+use mvs_protocol::registry_wire::RelayEntry;
 
 /// How often the silent connections are looked for (ms).
 const SWEEP_MS: u64 = 1000;
@@ -259,6 +261,44 @@ pub struct Options {
     pub hosted: Option<HostedOptions>,
     /// Its hosted lobbies get a short code (`relay_wire::Created::short`): true unless given (a direct host's: false).
     pub shorts: bool,
+    /// The registry it checks in to, on a link of its own: none by default, and then it opens no socket for one.
+    pub registry: Option<RegistryOptions>,
+}
+
+/// A registry the relay checks in to (`Options::registry`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistryOptions {
+    /// The registry's `host:port`, dialed as `relay_wire::parse_address` reads it (the config reader writes its
+    /// port, `registry_wire::REGISTRY_PORT` when the config names none).
+    pub address: String,
+    /// The id the registry's key must have.
+    pub id: String,
+    /// The address players reach this relay at (`host:port`), sent in the check-in as given.
+    pub public: String,
+    /// The config's `afterMs` (ms): read and kept; nothing in the relay acts on it.
+    pub after_ms: f64,
+    /// The beat, the silence, a start's time and the first and longest wait before a new dial (ms): BEAT_MS,
+    /// SILENT_MS, START_MS, 2000 and 60000.
+    pub beat_ms: f64,
+    pub silent_ms: f64,
+    pub start_ms: f64,
+    pub retry_ms: (f64, f64),
+}
+
+impl RegistryOptions {
+    /// A registry at `address` whose key's id is `id`, this relay reached at `public`; the times are the defaults.
+    pub fn new(address: &str, id: &str, public: &str) -> RegistryOptions {
+        RegistryOptions {
+            address: address.to_owned(),
+            id: id.to_owned(),
+            public: public.to_owned(),
+            after_ms: 20000.0,
+            beat_ms: mvs_protocol::registry_wire::BEAT_MS,
+            silent_ms: mvs_protocol::registry_wire::SILENT_MS,
+            start_ms: mvs_protocol::registry_wire::START_MS,
+            retry_ms: (2000.0, 60000.0),
+        }
+    }
 }
 
 impl Default for Options {
@@ -274,6 +314,7 @@ impl Default for Options {
             guest: None,
             hosted: Some(HostedOptions::system(true)),
             shorts: true,
+            registry: None,
         }
     }
 }
@@ -486,6 +527,8 @@ pub struct Relay {
     state: Rc<RefCell<State>>,
     tasks: Vec<JoinHandle<()>>,
     udp: Vec<Rc<Udp>>,
+    /// What the registry link last heard (empty with no link).
+    registry: Rc<Kept>,
 }
 
 impl ConnCell {
@@ -1482,7 +1525,19 @@ pub fn start_relay(o: Options) -> io::Result<Relay> {
             }
         }));
     }
-    Ok(Relay { port, id, shared, state, tasks, udp })
+    let registry = Rc::new(Kept::default());
+    if let Some(r) = o.registry {
+        let st = state.clone();
+        let link = Link {
+            o: r,
+            key: shared.key.clone(),
+            log: shared.log.clone(),
+            counts: Box::new(move || counts_of(&st.borrow().core)),
+            kept: registry.clone(),
+        };
+        tasks.push(spawn(&shared.log, registry_link::run(link)));
+    }
+    Ok(Relay { port, id, shared, state, tasks, udp, registry })
 }
 
 impl Relay {
@@ -1492,7 +1547,17 @@ impl Relay {
         f(&mut self.state.borrow_mut().core, now)
     }
 
-    /// `close`: every connection told 'relay stopping', the sockets closed.
+    /// The relays the registry last told of, by id (empty: none, or no link).
+    pub fn registry_relays(&self) -> Vec<RelayEntry> {
+        self.registry.relays.borrow().values().cloned().collect()
+    }
+
+    /// Whether the registry link is checked in now.
+    pub fn registry_up(&self) -> bool {
+        self.registry.up.get()
+    }
+
+    /// `close`: every connection told 'relay stopping', the sockets closed (the registry link's too).
     pub async fn close(mut self) {
         if self.shared.closing.replace(true) {
             return;

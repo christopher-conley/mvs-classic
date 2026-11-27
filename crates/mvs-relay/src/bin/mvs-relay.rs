@@ -14,9 +14,12 @@ use std::pin::pin;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mvs_protocol::relay_wire::{RELAY_PORT, RELAY_WIRE_VERSION};
+use indexmap::IndexMap;
+use mvs_protocol::registry_wire::REGISTRY_PORT;
+use mvs_protocol::relay_wire::{RELAY_PORT, RELAY_WIRE_VERSION, is_key_id, parse_address};
 use mvs_relay::limits::{DEFAULT_LIMITS, MIN_PACKET_BYTES, RelayLimits};
-use mvs_relay::server::{Options, start_relay};
+use mvs_relay::server::{Options, RegistryOptions, start_relay};
+use serde::de::IgnoredAny;
 use serde_json::{Value, json};
 
 /// The config file's settings.
@@ -26,6 +29,10 @@ struct Config {
     /// The address to listen on: empty for all of this PC's (IPv4 and IPv6).
     host: String,
     limits: RelayLimits,
+    /// The registry it checks in to (the config's `registry` block), if any.
+    registry: Option<RegistryOptions>,
+    /// The top-level fields it does not know, in the config's order: ignored, and named on stderr.
+    unknown: Vec<String>,
 }
 
 /// `YYYY-MM-DD HH:MM:SSZ`, UTC.
@@ -88,10 +95,64 @@ fn defaults_text() -> String {
     format!("{{\n  \"port\": {RELAY_PORT},\n  \"host\": \"\",\n  \"limits\": {{\n{}\n  }}\n}}\n", limits.join(",\n"))
 }
 
+/// The fields of a config's `registry` block.
+const REGISTRY_FIELDS: [&str; 4] = ["address", "id", "public", "afterMs"];
+/// The top-level fields `read_config` reads.
+const CONFIG_FIELDS: [&str; 4] = ["port", "host", "limits", "registry"];
+
+/// A registry's address as the link dials it, `host:port`: the port [`REGISTRY_PORT`] when the text names none
+/// (`parse_address` fills in the relay's port, and its answer does not say whether one was written). None when the
+/// text is not an address.
+fn registry_address(text: &str) -> Option<String> {
+    let a = parse_address(text)?;
+    let s = text.trim();
+    // (a bracketed IPv6 host has its port after the bracket; an unbracketed one has no port, only its colons)
+    let named = if s.starts_with('[') { s.contains("]:") } else { s.matches(':').count() == 1 };
+    let port = if named { a.port } else { REGISTRY_PORT };
+    Some(if a.host.contains(':') { format!("[{}]:{port}", a.host) } else { format!("{}:{port}", a.host) })
+}
+
+/// The config's `registry` block, `file` the config's name in a mistake's reason: None when there is none. A mistake
+/// in it (a field not known, an id that is not one, an address that is not one) stops the program, as a bad limit
+/// does.
+fn read_registry(config: &Value, file: &str) -> Result<Option<RegistryOptions>, String> {
+    let f = file;
+    let Some(block) = config.get("registry") else { return Ok(None) };
+    let Value::Object(b) = block else { return Err(format!("{f}: registry is not an object")) };
+    if let Some(k) = b.keys().find(|k| !REGISTRY_FIELDS.contains(&k.as_str())) {
+        return Err(format!("{f}: registry.{k} is not a registry field ({})", REGISTRY_FIELDS.join(", ")));
+    }
+    let text = |k: &str| b.get(k).and_then(Value::as_str);
+    let address = text("address")
+        .and_then(registry_address)
+        .ok_or_else(|| format!("{f}: registry.address is not an address (host[:port])"))?;
+    let id = text("id").filter(|s| is_key_id(s)).ok_or_else(|| format!("{f}: registry.id is not a relay id"))?;
+    let public = text("public")
+        .filter(|s| parse_address(s).is_some())
+        .ok_or_else(|| format!("{f}: registry.public is not an address (host[:port])"))?;
+    let mut o = RegistryOptions::new(&address, id, public);
+    if let Some(v) = b.get("afterMs") {
+        match v.as_f64() {
+            Some(n) if n.is_finite() && n >= 0.0 => o.after_ms = n,
+            _ => return Err(format!("{f}: registry.afterMs is not a number of 0 or more")),
+        }
+    }
+    Ok(Some(o))
+}
+
+/// The top-level fields of a config's text that `read_config` does not read, in the text's order (a `Value`'s map
+/// sorts its keys, so the text is read again in order).
+fn unknown_fields(text: &str) -> Vec<String> {
+    serde_json::from_str::<IndexMap<String, IgnoredAny>>(text)
+        .map(|m| m.into_keys().filter(|k| !CONFIG_FIELDS.contains(&k.as_str())).collect())
+        .unwrap_or_default()
+}
+
 /// The config file's, over the defaults; written with the defaults when there is none.
 fn read_config(file: &Path) -> Config {
     let f = file.display();
-    let mut out = Config { port: RELAY_PORT, host: String::new(), limits: DEFAULT_LIMITS };
+    let mut out =
+        Config { port: RELAY_PORT, host: String::new(), limits: DEFAULT_LIMITS, registry: None, unknown: Vec::new() };
     if !file.exists() {
         if let Err(e) = std::fs::write(file, defaults_text()) {
             fail(&format!("could not write {f}: {e}"));
@@ -100,9 +161,9 @@ fn read_config(file: &Path) -> Config {
         return out;
     }
     let text = std::fs::read_to_string(file).unwrap_or_else(|e| fail(&format!("could not read {f}: {e}")));
-    let raw: Value = serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
-        .unwrap_or_else(|e| fail(&format!("{f} is not JSON: {e}")));
-    let Value::Object(c) = raw else { fail(&format!("{f} is not a JSON object")) };
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let raw: Value = serde_json::from_str(text).unwrap_or_else(|e| fail(&format!("{f} is not JSON: {e}")));
+    let Value::Object(c) = &raw else { fail(&format!("{f} is not a JSON object")) };
     if let Some(p) = c.get("port") {
         out.port = port(p, &format!("{f}: port"));
     }
@@ -134,6 +195,8 @@ fn read_config(file: &Path) -> Config {
             ));
         }
     }
+    out.registry = read_registry(&raw, &f.to_string()).unwrap_or_else(|e| fail(&e));
+    out.unknown = unknown_fields(text);
     out
 }
 
@@ -215,6 +278,9 @@ fn main() {
         fail(&format!("could not make or read the key {}: {e}", key_file.display()));
     }
     let mut config = read_config(&config_file);
+    for k in &config.unknown {
+        eprintln!("mvs-relay: {}: unknown field {k:?} is ignored", config_file.display());
+    }
     if let Some(p) = arg(&args, "--port") {
         config.port = port(&Value::String(p), "--port");
     }
@@ -239,6 +305,7 @@ fn main() {
             key_file: Some(key_file),
             limits: config.limits.clone(),
             log: Some(Box::new(say)),
+            registry: config.registry.clone(),
             ..Options::default()
         };
         let relay = match start_relay(o) {
@@ -274,4 +341,109 @@ fn main() {
         .await;
         std::process::exit(code);
     });
+}
+
+#[cfg(test)]
+mod read_registry {
+    use super::*;
+
+    const ID: &str = "r0123456789abcdef0123456789abcdef";
+
+    fn read(v: Value) -> Result<Option<RegistryOptions>, String> {
+        read_registry(&v, "c.json")
+    }
+
+    fn whole() -> Value {
+        json!({ "address": "reg.example:7000", "id": ID, "public": "relay.example:7777", "afterMs": 5000 })
+    }
+
+    /// The `Err` of `registry` set to `block`, which must name `field`.
+    fn names(block: Value, field: &str) {
+        let e = read(json!({ "registry": block })).expect_err("a mistake stops the program");
+        assert!(e.starts_with("c.json: "), "{e}");
+        assert!(e.contains(field), "{e} names {field}");
+    }
+
+    #[test]
+    fn no_block_is_no_registry() {
+        assert_eq!(read(json!({ "port": 7777 })), Ok(None));
+    }
+
+    #[test]
+    fn a_whole_block_reads() {
+        let r = read(json!({ "registry": whole() })).unwrap().expect("a registry");
+        let mut want = RegistryOptions::new("reg.example:7000", ID, "relay.example:7777");
+        want.after_ms = 5000.0;
+        assert_eq!(r, want);
+    }
+
+    #[test]
+    fn after_ms_defaults_to_20000() {
+        let r = read(json!({ "registry": { "address": "reg.example", "id": ID, "public": "relay.example" } }));
+        assert_eq!(r.unwrap().expect("a registry").after_ms, 20000.0);
+    }
+
+    #[test]
+    fn an_address_without_a_port_takes_the_registry_port() {
+        let port = |a: &str| {
+            let r = read(json!({ "registry": { "address": a, "id": ID, "public": "relay.example" } }));
+            let r = r.unwrap().expect("a registry");
+            mvs_protocol::relay_wire::parse_address(&r.address).expect("an address").port
+        };
+        assert_eq!(port("reg.example"), mvs_protocol::registry_wire::REGISTRY_PORT);
+        assert_eq!(port("reg.example:7777"), 7777);
+        assert_eq!(port("[::1]"), mvs_protocol::registry_wire::REGISTRY_PORT);
+        assert_eq!(port("[::1]:7000"), 7000);
+        assert_eq!(port("::1"), mvs_protocol::registry_wire::REGISTRY_PORT);
+    }
+
+    #[test]
+    fn a_bad_id_is_named() {
+        let mut b = whole();
+        b["id"] = json!("not-an-id");
+        names(b, "registry.id");
+        let mut b = whole();
+        b.as_object_mut().unwrap().remove("id");
+        names(b, "registry.id");
+    }
+
+    #[test]
+    fn a_bad_address_is_named() {
+        let mut b = whole();
+        b["address"] = json!("reg example");
+        names(b, "registry.address");
+        let mut b = whole();
+        b["public"] = json!(7);
+        names(b, "registry.public");
+    }
+
+    #[test]
+    fn an_unknown_field_is_named() {
+        let mut b = whole();
+        b["adress"] = json!("reg.example");
+        names(b, "registry.adress");
+        names(json!("reg.example"), "registry");
+    }
+
+    #[test]
+    fn a_negative_after_ms_is_named() {
+        let mut b = whole();
+        b["afterMs"] = json!(-1);
+        names(b, "registry.afterMs");
+        let mut b = whole();
+        b["afterMs"] = json!("soon");
+        names(b, "registry.afterMs");
+    }
+}
+
+#[cfg(test)]
+mod unknown_fields {
+    use super::*;
+
+    #[test]
+    fn a_misspelled_block_is_named() {
+        assert_eq!(unknown_fields(r#"{"registery": {}}"#), vec!["registery".to_string()]);
+        assert_eq!(unknown_fields(r#"{"port": 1, "host": "", "limits": {}, "registry": {}}"#), Vec::<String>::new());
+        assert_eq!(unknown_fields(r#"{"zeta": 1, "port": 1, "alpha": 2}"#), vec!["zeta".to_string(), "alpha".into()]);
+    }
 }
