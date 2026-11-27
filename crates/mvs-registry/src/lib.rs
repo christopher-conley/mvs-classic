@@ -4,3 +4,4 @@ pub mod core;
 pub mod rules;
 pub mod server;
 pub mod state;
+pub mod web;

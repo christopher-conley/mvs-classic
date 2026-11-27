@@ -57,6 +57,8 @@ rand = "=0.10.3"
 base64 = "=0.23.1"
 # mvs-relay and mvs-registry: their sockets on a current-thread runtime (the game uses std sockets on a net thread)
 tokio = { version = "=1.53.3", default-features = false, features = ["rt", "net", "io-util", "time"] }
+# mvs-registry: its two web pages
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "form", "tokio"] }
 # mvs-relay: a dual-stack listening socket (IPv6 with IPv4 too) and its UDP twins
 socket2 = "=0.6.5"
 png = "0.18.1"

@@ -21,3 +21,4 @@ ed25519-dalek.workspace = true
 rand.workspace = true
 base64.workspace = true
 tokio = { workspace = true, features = ["sync", "signal"] }
+axum.workspace = true

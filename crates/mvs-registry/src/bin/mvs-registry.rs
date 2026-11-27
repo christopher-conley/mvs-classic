@@ -5,10 +5,12 @@
 //!
 //!   mvs-registry [--port <n>] [--host <ip>] [--config <file>] [--version]
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
+use std::rc::Rc;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +21,8 @@ use mvs_protocol::relay_wire::{is_key_id, parse_address};
 use mvs_registry::core::{Admission, Approved, Limits, Mode, Origin};
 use mvs_registry::rules::{Ban, Bans};
 use mvs_registry::server::{Options, start_registry};
-use mvs_registry::state::{State, Submissions, admission};
+use mvs_registry::state::{State, Submissions, SubmitCx, admission};
+use mvs_registry::web::{PageOptions, start_pages};
 use serde_json::{Value, json};
 
 /// The config's fields, in the order the first run writes them.
@@ -458,6 +461,26 @@ fn main() {
             "mvs-registry {version} (registry wire {REGISTRY_WIRE_VERSION}), registry id {}, port {} (TCP), admission {mode}, {relays} relays and {bans} bans in its config",
             registry.id, registry.port
         ));
+        // (kept until the program exits: dropped, the pages stop)
+        let p = config.pages;
+        let _pages = p.web.map(|w| {
+            let state = Rc::new(RefCell::new(state));
+            let cx = SubmitCx::new(registry.handle(), state, state_file, p.submits_per_minute, p.submissions);
+            let o = PageOptions {
+                port: w.port,
+                host: w.host,
+                admin_port: w.admin_port,
+                admin_host: w.admin_host,
+                admin_token: w.admin_token,
+            };
+            start_pages(o, cx).unwrap_or_else(|e| {
+                let (f, what, port) = (config_file.display(), e.what, e.port);
+                match e.error.kind() {
+                    std::io::ErrorKind::AddrInUse => fail(&format!("{f}: {what} {port} is in use by another program")),
+                    _ => fail(&format!("{f}: could not listen on {what} {port}: {}", e.error)),
+                }
+            })
+        });
         say(&format!("config {}", config_file.display()));
         say("relays connect to this PC's outside address and that port; behind a router, forward it (TCP) to this PC. Ctrl+C stops");
         let first = stop_signal().await;
